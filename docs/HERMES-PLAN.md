@@ -1,19 +1,29 @@
 # Hermes — Personal Chief-of-Staff Agent
 
-*Planning document, v0.1 — July 2026*
+*Planning document, v0.2 — July 2026*
+*(v0.2 re-architected around the Hermes Agent framework by Nous Research instead
+of a from-scratch orchestrator.)*
 
-Hermes is the working name for the assistant described in the "Shawn AI — A Personal
-Operating System" concept doc. This document turns that concept into a concrete,
-phased architecture grounded in the systems Shawn already runs today.
+This plan turns the "Shawn AI — A Personal Operating System" concept doc into a
+concrete build, grounded in (a) the systems Shawn already runs and (b) the
+open-source **Hermes Agent** framework (github.com/NousResearch/hermes-agent,
+released Feb 2026), which ships the orchestration/memory/messaging plumbing
+out of the box.
+
+> **Verification note:** the official docs
+> (hermes-agent.nousresearch.com/docs) were unreachable from the planning
+> session's network; details below come from search-indexed doc content and
+> third-party writeups. Verify exact config keys, limits, and Photon pricing
+> against live docs during Phase 0.
 
 ---
 
 ## 1. The core problem
 
-> "I basically start over every morning without memory of what is happening or what
-> I need to do."
+> "I basically start over every morning without memory of what is happening or
+> what I need to do."
 
-Shawn operates across at least four distinct profiles, each with its own calendars,
+Shawn operates across at least four profiles, each with its own calendars,
 email streams, and message threads:
 
 | Profile | What it involves | Existing tooling |
@@ -23,206 +33,221 @@ email streams, and message threads:
 | **Freelance dev** | Client projects, GitHub, Vercel/Linear, invoices | Ad-hoc |
 | **Personal/family** | Date nights, family logistics, budget | Nothing systematic |
 
-The failure mode isn't a lack of data — it's that nothing **persists and synthesizes**
-across days and across profiles. Hermes' job is to be the memory and the
-proactive layer on top of everything already flowing in.
+The failure mode isn't lack of data — it's that nothing **persists and
+synthesizes** across days and across profiles.
 
 ## 2. What exists today (build on it, don't replace it)
 
-1. **Alina Care Assistant** (Apps Script + Google Sheet, sheet owned by
+1. **Alina Care Assistant** (Apps Script + Google Sheet, owned by
    nursevidales@gmail.com):
    - `CoverageNetwork` — sitters/helpers with tiers, capabilities
      (`pickup`, `watch_unsupervised`, `aba_supervision`), recurring availability.
-   - `SchoolSchedule` — extracted from "Friday Forward" school emails
-     (early releases, holidays, events).
-   - `PlanningSessions` / `CalendarEvents` — schema exists, mostly unused so far.
-   - Inbound/outbound SMS via `doPost` webhook → `handleInboundSMS` → `sendSMS`
-     (an `ErrorLog` shows a recurring `substring of undefined` crash in `sendSMS`
-     worth fixing regardless).
-2. **shawn-classifier** — email classification giving visibility/reminders.
+   - `SchoolSchedule` — auto-extracted from "Friday Forward" school emails.
+   - `PlanningSessions` / `CalendarEvents` — schemas exist, mostly unused.
+   - SMS in/out via `doPost` → `handleInboundSMS` → `sendSMS`; the `ErrorLog`
+     shows a recurring `substring of undefined` crash in `sendSMS` that has
+     been eating real inbound questions — fix regardless.
+2. **shawn-classifier** — email classification for visibility/reminders.
 3. **Gmail labels** — a de-facto workflow state machine (`@Action Item`,
-   `@Waiting`, `@For Follow Up`, `@Done`, `@AaA:*` assignee queues).
+   `@Waiting`, `@For Follow Up`, `@Done`, `@AaA:*` queues).
 
-These are Hermes' first **tools and data sources**, not things to rewrite.
+These become Hermes' **data sources and skills**, not things to rewrite.
 
-## 3. Proposed architecture
+## 3. What Hermes Agent gives us out of the box
 
-Five layers. Hermes is an orchestrator (Claude Agent SDK) with tools, memory,
-and scheduled triggers — not a monolith.
+Mapping the concept doc's requirements to shipped Hermes features:
+
+| Need (from concept doc) | Hermes Agent feature |
+|---|---|
+| iMessage as the interface | Two paths: **BlueBubbles** channel (Mac relay, since v0.9.0) or **Photon Spectrum** (v0.17.0+): gRPC-native iMessage with *no Mac* — `hermes photon setup --phone …`, device-code login, managed line pool that assigns a dedicated iMessage line |
+| Remembers context over time | Built-in persistent memory: `MEMORY.md` (~2.2k chars) + `USER.md` (~1.4k chars) in `~/.hermes/memories/`, injected into the system prompt each session; agent curates its own entries via a memory tool (bounded — errors instead of silently dropping, agent consolidates) |
+| "Did I ever …?" recall | `session_search` tool — all CLI + messaging sessions stored in SQLite with FTS5 full-text search |
+| Deeper long-term memory | 8 pluggable external memory providers (one active at a time) alongside built-in memory |
+| Proactive, not reactive | Built-in **cron scheduler** (gateway ticks every 60s, jobs run in isolated sessions, results delivered to any connected channel); plain-English job creation; a first-class "heartbeat" primitive is in progress upstream (issue #15400) |
+| Reads calendar + provider emails | Bundled **google-workspace skill** (`mail_search`, `mail_get`, `cal_list_calendars`, `cal_list_events`, `cal_create_event`, `drive_search`, Sheets/Docs/Contacts) with OAuth2; write operations require user confirmation. Composio MCP is an alternative path |
+| Multi-step workflows | Skills system: Markdown playbooks in `~/.hermes/skills/` (agentskills.io standard, progressive disclosure, auto slash-commands); agent can author its own skills after solving a problem |
+| Personality / identity | `SOUL.md` per profile |
+| Runs on what we have | Gateway is a FastAPI server (port 8642) + dashboard; terminal backends: local, Docker, SSH, Modal, Daytona, Apptainer. Model-agnostic: Anthropic/OpenRouter/OpenAI/own endpoint, switchable via `hermes model` |
+| Safety on memory | Memory entries scanned for prompt-injection/exfiltration patterns and invisible Unicode before acceptance |
+
+**Consequence: we are not building a framework.** We are deploying Hermes and
+writing the *Shawn-specific layer*: skills, memory seeds, cron jobs, SOUL.md,
+and the bridge to the Alina Care sheet.
+
+## 4. Architecture (v0.2)
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  INTERFACE      iMessage (primary) · SMS fallback           │
-│                 identity: always "🤖 Hermes / Shawn AI"     │
-├─────────────────────────────────────────────────────────────┤
-│  ORCHESTRATOR   Claude Agent SDK agent                      │
-│                 · conversational loop (inbound messages)    │
-│                 · scheduled heartbeats (cron):              │
-│                   - 7am daily briefing                      │
-│                   - conflict scan (calendars × school ×     │
-│                     Patty × work)                           │
-│                   - weekly "date night" / open-loop check   │
-│                 · subagents per domain when needed          │
-├─────────────────────────────────────────────────────────────┤
-│  MEMORY         persistent, structured, profile-tagged      │
-│                 · people registry (sitters, providers,      │
-│                   carriers, clients)                        │
-│                 · preferences & facts ("Patty liked that    │
-│                   Italian place", budget rules)             │
-│                 · open loops (waiting-on, follow-ups)       │
-│                 · episodic log (what Hermes did & learned)  │
-├─────────────────────────────────────────────────────────────┤
-│  INGESTION      Gmail (multi-account) · Google Calendars    │
-│                 (multi-account incl. Patty's + school) ·    │
-│                 Alina Care Sheet · iMessage history         │
-│                 (chat.db, local-only extraction)            │
-├─────────────────────────────────────────────────────────────┤
-│  ACTIONS        calendar write · sitter outreach (existing  │
-│                 SMS pipeline) · email drafts · reservations │
-│                 (later) — all confirm-before-act by default │
-└─────────────────────────────────────────────────────────────┘
+                    ┌──────────────────────────────────────┐
+   Shawn & Patty ──▶│  iMessage (Photon Spectrum line —    │
+   sitters/helpers  │  dedicated number, self-identifies   │
+                    │  as the assistant)                   │
+                    └───────────────┬──────────────────────┘
+                                    │
+                    ┌───────────────▼──────────────────────┐
+                    │  HERMES GATEWAY (single profile)     │
+                    │  · SOUL.md — identity & guardrails   │
+                    │  · MEMORY.md / USER.md — core facts  │
+                    │  · session_search — episodic recall  │
+                    │  · cron jobs:                        │
+                    │      07:00 morning-briefing          │
+                    │      daily  conflict-scan            │
+                    │      weekly date-night-check         │
+                    │      weekly memory-hygiene           │
+                    └───┬───────────────┬──────────────┬───┘
+                        │               │              │
+              ┌─────────▼───┐   ┌───────▼──────┐  ┌────▼─────────────┐
+              │ google-     │   │ custom skills│  │ alina-care bridge│
+              │ workspace   │   │ (this repo): │  │ skill: reads/    │
+              │ skill:      │   │ briefing,    │  │ writes the Sheet │
+              │ Gmail, Cal, │   │ conflict,    │  │ (CoverageNetwork,│
+              │ Drive,Sheets│   │ date-night,  │  │ SchoolSchedule,  │
+              │ (multi-acct)│   │ outreach,    │  │ PlanningSessions)│
+              │             │   │ insurance    │  │                  │
+              └─────────────┘   └──────────────┘  └──────────────────┘
 ```
 
-### 3.1 The profile router
+### 4.1 One profile, not four
 
-Every inbound item (email, message, calendar event) gets tagged with a profile:
-`family/alina`, `insurance`, `dev`, `personal`. This is exactly what
-shawn-classifier already does for email — extend the same idea to all streams.
-The router determines which memory namespace, which tone, and which urgency
-rules apply. It's also what keeps the morning briefing readable ("3 things for
-Alina, 2 for the agency, 1 personal") instead of a firehose.
+Hermes "profiles" are *fully isolated* instances (own config, memory, skills,
+sessions). Isolation is exactly wrong for Shawn's core need — **cross-domain
+coordination** (a work call colliding with school pickup colliding with
+Patty's calendar). So: **one Hermes profile**, with the four life-domains
+expressed as:
+- a domain-tagging convention inside MEMORY.md entries and skill outputs
+  (`[alina]`, `[ins]`, `[dev]`, `[personal]`), and
+- one skill per domain encoding its rules (which labels matter, tone,
+  escalation thresholds).
 
-### 3.2 Memory design (the heart of the system)
+A second isolated profile *could* later host a business-only agent (e.g., an
+agency bot that talks to clients) without contaminating the family assistant.
 
-The concept doc's key requirement — *starts informed rather than blank* — means
-memory is the first thing to get right:
+### 4.2 Memory layering
 
-- **Structured store**: extend the existing Google Sheet pattern (or SQLite if
-  Hermes runs on a Mac) with tables Hermes reads/writes:
-  `People`, `Preferences`, `OpenLoops`, `EpisodicLog`.
-  Staying in Sheets keeps the existing Apps Script interoperable.
-- **Narrative memory**: markdown files per profile (like CLAUDE.md files) the
-  agent loads as context — "what's true about the insurance business",
-  "Alina's current care team", "how Shawn & Patty plan things".
-- **Extraction, not retention**: per the doc's privacy stance, iMessage history
-  is mined locally for *insights* (favorite restaurants, reliable sitters,
-  important dates); raw messages never leave the Mac.
-- **Write-back discipline**: after every interaction and every heartbeat run,
-  Hermes appends what it learned/did. That's what kills the
-  "start over every morning" problem.
+Three tiers, cheapest first:
+1. **Core memory** (`MEMORY.md`/`USER.md`): the ~30 always-true facts — care
+   team, sitter tiers, budget rules, key clients, how Shawn & Patty plan.
+   Bounded size forces curation; a weekly `memory-hygiene` cron job reviews
+   and consolidates.
+2. **Episodic recall** (`session_search`): free — every conversation is
+   FTS5-searchable. Answers "did I ever email Stephanie about ABA
+   observation?"-class questions if the interaction happened through Hermes.
+3. **Structured domain data**: stays in the **Google Sheet** (CoverageNetwork,
+   SchoolSchedule, PlanningSessions) accessed via the Sheets tools — keeping
+   the existing Apps Script and Patty's visibility intact. The sheet is the
+   system of record; Hermes memory holds pointers and distilled preferences.
 
-### 3.3 iMessage — the hard constraint
+Evaluate an external memory provider (tier 4) only if these three prove
+insufficient — likely candidates once volume grows: restaurant/preference
+history, provider-notes corpus.
 
-Apple has no official iMessage API. Real options:
+### 4.3 iMessage transport decision
 
-| Option | How | Trade-offs |
-|---|---|---|
-| **A. Always-on Mac + BlueBubbles** | Mac mini (or the existing Mac) runs BlueBubbles server; Hermes talks to its REST API/webhooks | True blue-bubble iMessage, full send/receive, group chats. Requires a Mac that never sleeps. **Recommended target.** |
-| B. AppleScript / Shortcuts on Mac | Script Messages.app directly | Send works; reliable *receive* requires polling `chat.db`. Fragile across macOS updates. |
-| C. Keep Twilio SMS (current) | Existing Apps Script pipeline | Works today, cloud-friendly, but green bubble and no group-thread richness. **Good Phase-1 bridge** while the Mac path is set up. |
+**Recommendation: Photon Spectrum.**
+- No always-on Mac required; Hermes can live on a small VPS/Docker host.
+- It assigns a **dedicated iMessage line** — which is actually *better* for
+  the concept doc's "clear AI identity" rule: sitters and providers see a
+  distinct number that introduces itself as the assistant, rather than
+  messages coming from Shawn's personal Apple ID.
+- BlueBubbles remains the fallback if Photon's managed line pool has
+  pricing/reliability issues (spare Mac + BlueBubbles server + Apple ID).
+- The existing Twilio/SMS pipeline stays as-is during transition; Hermes also
+  supports plain SMS channels if we ever want to consolidate.
 
-Pragmatic path: **start on SMS (already wired), move to BlueBubbles when the
-always-on Mac is ready.** The orchestrator shouldn't care which transport is
-underneath — make "messaging" a swappable tool interface from day one.
+Open items to verify in Phase 0: Photon pricing, deliverability/limits on
+outbound to new contacts (sitter outreach), group-chat support (family thread
+with Shawn + Patty).
 
-### 3.4 Where Hermes runs
+### 4.4 Model + hosting
 
-Two viable homes, and the doc assumes local-first:
+- **Model**: Anthropic Claude via API (the gateway preserves Anthropic prompt
+  cache across turns, so it's a first-class path). Start with Sonnet-tier for
+  cost; escalate the briefing/planning jobs to a stronger model if needed —
+  switching is `hermes model`, no code changes.
+- **Hosting**: Docker on a small VPS (or the Mac if preferred — no longer
+  required). Gateway port 8642 + dashboard; back up `~/.hermes/` (memory,
+  skills, sessions) nightly.
 
-- **On the Mac** (concept doc's assumption): required anyway for iMessage and
-  chat.db mining. Claude Agent SDK runs fine locally; cron via launchd.
-- **Hybrid (recommended)**: cloud (or Claude Code on the web / a small VPS)
-  hosts the orchestrator + Google integrations; the Mac runs only a thin
-  iMessage bridge (BlueBubbles). This keeps Hermes alive when the Mac sleeps
-  and keeps Google auth in one place — only messaging round-trips touch the Mac.
-
-### 3.5 A note on the doc's "technical reviewer" caveat
-
-The concept leaned on unverified "swarm mode" and "proactive memory framework"
-capabilities. As of mid-2026, the Claude Agent SDK verifiably supports the
-pieces Hermes needs: subagents (fan-out per domain), scheduled/cron invocation,
-tool use against Gmail/Calendar/Drive via MCP, and file-based persistent
-memory. Nothing in this plan depends on speculative features.
-
-## 4. Phased build path
-
-### Phase 0 — Consolidate & stabilize (≈ a weekend)
-- Fix the `sendSMS` crash in the Apps Script (ErrorLog shows it eating real
-  inbound questions).
-- Inventory all Google accounts/calendars in play. **Note:** the
-  myacaexpress@gmail.com account only exposes its own calendar today — Patty's
-  calendar, personal calendar, and school calendar need to be shared into one
-  account (or each account connected) before conflict detection can work.
-- Define the memory schema (People / Preferences / OpenLoops / EpisodicLog)
-  and seed it manually with the top ~20 facts (care team, sitter tiers already
-  in CoverageNetwork, key clients, budget rules).
-
-### Phase 1 — Core loop: "Hermes remembers" (doc's Phase 1)
-- Orchestrator (Claude Agent SDK) with tools: Gmail read, Calendar read,
-  Sheet read/write, send/receive message (SMS transport first).
-- **Morning briefing** at 7am: profile-grouped digest — today's events across
-  all calendars, school exceptions, @Action Item / @Waiting emails needing
-  attention, open loops.
-- Conversational Q&A over the same data ("Did I ever email Stephanie about ABA
-  observation?" — a real question the current bot crashed on).
-- Every run writes back to memory.
-
-### Phase 2 — Proactive layer (doc's Phase 2)
-- Conflict scanner: my calendar × Patty's × school schedule × care sessions;
-  flags collisions days ahead with concrete options.
-- Calendar **write** access (create/move events after confirmation).
-- Opportunity detection: free Saturday + sitter availability from
-  CoverageNetwork + "it's been 3 weeks" → date-night suggestion.
-- Insurance-side nudges: @Waiting threads gone quiet, licensing/commission
-  deadlines from carrier emails.
-
-### Phase 3 — Full orchestration (doc's Phase 3)
-- Sitter outreach automation using the existing PlanningSessions schema:
-  Hermes texts tier-1 → tier-2 helpers, tracks responses, escalates, always
-  self-identifying as an AI with human-handoff on request.
-- Reservations (OpenTable/Resy where APIs allow, otherwise drafted for
-  one-tap confirm).
-- Multi-step parallel workflows (the date-night scenario end-to-end:
-  availability → sitter → restaurant → budget → one confirmation message).
-- iMessage history mining on the Mac to enrich preferences.
-
-## 5. Guardrails (from the concept doc, kept as hard rules)
-
-1. Every outbound message to third parties is labeled as the AI assistant;
-   first contact includes a short intro.
-2. "Human please" / urgency → immediate handoff + notify Shawn.
-3. Confirm-before-act for anything that spends money, commits time, or
-   messages someone new. Trust levels can loosen per-action-type over time.
-4. Raw iMessage data stays on the Mac; only extracted insights persist.
-
-## 6. Open decisions
-
-1. **Runtime home**: hybrid (cloud brain + Mac iMessage bridge) vs. all-local
-   on an always-on Mac. → Recommend hybrid.
-2. **Messaging transport for Phase 1**: reuse the Twilio/SMS pipeline now and
-   add BlueBubbles later, vs. wait for the Mac bridge. → Recommend SMS now.
-3. **Memory store**: Google Sheets (Apps Script interop, Patty can see it) vs.
-   SQLite + markdown (faster, more private). → Recommend Sheets for structured
-   tables + markdown files in this repo for narrative memory.
-4. **Account topology**: share all calendars into one Google account vs.
-   connect each account. Which accounts exist, and does Patty consent to
-   calendar sharing + Hermes reading her availability?
-5. **Naming**: framework = Hermes; the outward-facing messaging identity —
-   keep "Shawn AI" (as in the doc) or rebrand to Hermes?
-
-## 7. Repo layout (proposed, this repo)
+## 5. What we actually build (this repo)
 
 ```
 Shawn/
-├── docs/HERMES-PLAN.md        # this file
-├── hermes/                    # orchestrator (Claude Agent SDK, TypeScript)
-│   ├── agents/                # briefing, conflict-scan, outreach subagents
-│   ├── tools/                 # gmail, calendar, sheet, messaging (transport-agnostic)
-│   └── heartbeats/            # cron entrypoints
-├── memory/                    # narrative memory (md per profile) — private repo
-│   ├── family-alina.md
-│   ├── insurance.md
-│   ├── dev.md
-│   └── personal.md
-└── bridge/                    # Mac-side iMessage bridge config (BlueBubbles)
+├── docs/HERMES-PLAN.md          # this file
+├── soul/SOUL.md                 # identity, tone, guardrails (§6)
+├── memory-seeds/                # initial MEMORY.md / USER.md content
+├── skills/
+│   ├── morning-briefing/        # profile-grouped daily digest
+│   ├── conflict-scan/           # calendars × school × Patty × care sessions
+│   ├── date-night/              # free evening + sitter + restaurant + budget
+│   ├── coverage-outreach/       # tiered sitter contact w/ PlanningSessions
+│   ├── alina-care-bridge/       # read/write the Alina Care sheet
+│   ├── insurance-inbox/         # @Action Item / @Waiting / carrier deadlines
+│   └── school-schedule/         # Friday Forward parsing (port from Apps Script)
+├── cron/jobs.md                 # schedule definitions + delivery targets
+└── deploy/                      # Dockerfile, .env template, backup script
 ```
+
+Skills are Markdown playbooks — most of the "code" here is carefully written
+procedure + the few scripts a skill shells out to. The Apps Script logic
+(Friday Forward parsing, coverage tiers) ports naturally into skill
+instructions + Sheets reads.
+
+## 6. Guardrails (unchanged from concept doc — enforced via SOUL.md + skill rules)
+
+1. Every outbound message to third parties self-identifies as the AI
+   assistant; first contact includes a short intro.
+2. "Human please" / urgency → immediate handoff + notify Shawn.
+3. Confirm-before-act for anything that spends money, commits time, or
+   messages someone new (Hermes' google-workspace skill already gates writes
+   behind confirmation; extend the same rule to outreach).
+4. Raw personal-message history is mined locally only; only extracted
+   insights enter memory.
+5. Memory-injection scanning stays on (Hermes default) — memory is in the
+   system prompt.
+
+## 7. Phased build path (v0.2)
+
+### Phase 0 — Stand it up (a weekend)
+- Fix the `sendSMS` crash in the existing Apps Script (it's still the
+  production assistant until Hermes takes over).
+- Provision VPS/Docker, install Hermes, connect Anthropic API key.
+- `hermes photon setup` — verify iMessage line, pricing, deliverability.
+- Connect google-workspace skill to myacaexpress@gmail.com; **calendar
+  homework**: share Patty's / personal / school calendars into the account
+  (today it sees only its own calendar — conflict detection is impossible
+  until this is done).
+- Write SOUL.md + seed MEMORY.md/USER.md from CoverageNetwork and the top
+  ~30 facts.
+
+### Phase 1 — Core loop: "Hermes remembers" (concept doc Phase 1)
+- Conversational Q&A over Gmail/Calendar/Sheet via iMessage.
+- `morning-briefing` cron at 07:00, profile-grouped, delivered to iMessage.
+- `alina-care-bridge` + `school-schedule` skills (read-only).
+- Memory write-back discipline: briefing and every session update MEMORY.md.
+
+### Phase 2 — Proactive layer (concept doc Phase 2)
+- `conflict-scan` cron across all shared calendars + SchoolSchedule.
+- Calendar write access (confirm-first).
+- `date-night` opportunity detection (free Saturday + CoverageNetwork
+  availability + "it's been 3 weeks").
+- `insurance-inbox`: stale @Waiting threads, licensing/commission deadlines.
+
+### Phase 3 — Full orchestration (concept doc Phase 3)
+- `coverage-outreach`: Hermes messages tier-1 → tier-2 helpers directly on
+  its own iMessage line, tracks responses in PlanningSessions, escalates,
+  hands off to Shawn on request.
+- Restaurant reservations (drafted for one-tap confirm; API booking where
+  available).
+- End-to-end date-night scenario as a single skill invoking the others.
+- Retire the Apps Script SMS path once Hermes has feature parity.
+
+## 8. Open decisions
+
+1. **Photon vs BlueBubbles** — recommend Photon (no Mac, dedicated line);
+   confirm pricing/deliverability in Phase 0.
+2. **Hosting** — small VPS w/ Docker vs the Mac. Recommend VPS.
+3. **Model** — Claude Sonnet-tier default, stronger model for planning jobs?
+4. **Naming/identity** — framework is Hermes (fitting: it *is* the messenger);
+   outward identity on the iMessage line: "Shawn AI" per the doc, or Hermes?
+5. **Patty's calendars** — sharing consent + which account topology.
+6. **Second business-only profile later?** — defer until family assistant is
+   stable.
