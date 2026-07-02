@@ -32,6 +32,24 @@ the user to do them, pausing only where a human is genuinely required.
   versions installed, and anything deviating from the runbook — so the next
   session (local or cloud) knows where setup stands.
 
+## Coordination protocol (local ↔ cloud sessions)
+
+A cloud Claude Code session plans and reviews in this same branch; you are
+the hands on the machine. The branch is the channel:
+
+1. **Start of any work**: `git pull` this branch first — the cloud session
+   may have pushed updated instructions, skills, or task files.
+2. **After each completed milestone** (install done, gateway up, Telegram
+   round-trip verified, Google connected, crons created): commit and push
+   `docs/SETUP-LOG.md` immediately — one short dated entry per milestone.
+   Never let progress sit unpushed; the cloud session is blind otherwise.
+3. **When blocked**: write the exact error and what you tried into
+   SETUP-LOG.md under a `## BLOCKED` heading and push — then tell the user.
+   The cloud session will pick it up and push revised instructions.
+4. Task requests from the cloud session may appear as `docs/tasks/*.md` —
+   treat an unchecked item there as work to execute, check it off and push
+   when done.
+
 ## Repo map
 
 `docs/HERMES-PLAN.md` architecture/plan · `docs/SETUP.md` runbook ·
