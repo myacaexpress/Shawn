@@ -244,7 +244,10 @@ instructions + Sheets reads.
 
 1. **Photon vs BlueBubbles** — recommend Photon (no Mac, dedicated line);
    confirm pricing/deliverability in Phase 0.
-2. **Hosting** — small VPS w/ Docker vs the Mac. Recommend VPS.
+2. **Hosting** — ✅ DECIDED: locally on Shawn's Mac laptop (see SETUP.md
+   §1.1 for launchd + anti-sleep setup). Bonus: BlueBubbles becomes a
+   localhost option and delegate-coding runs `claude -p` directly with no
+   SSH. Escalate to Mac mini/VPS only if laptop sleep proves disruptive.
 3. **Model** — Claude Sonnet-tier default, stronger model for planning jobs?
 4. **Naming/identity** — framework is Hermes (fitting: it *is* the messenger);
    outward identity on the iMessage line: "Shawn AI" per the doc, or Hermes?

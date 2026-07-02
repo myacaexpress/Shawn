@@ -22,16 +22,18 @@ Zero infrastructure: the Claude GitHub Action watches Shawn's repos.
    issue/PR in MEMORY.md `[loops]`, check status in later heartbeats, and
    tell Shawn when the PR is ready for review.
 
-## Lane B — Headless Claude Code on the laptop (local/uncommitted work)
+## Lane B — Headless Claude Code locally (local/uncommitted work)
 
-For work on Shawn's machine (Apps Script push, local scripts, anything not
-repo-hosted). Requires: Tailscale (or SSH reachability) + `claude` CLI
-installed on the laptop + a dedicated SSH key restricted to Shawn's user.
+Hermes runs on Shawn's laptop, so this is just the local terminal backend —
+no SSH needed. Requires the `claude` CLI installed. For work on Shawn's
+machine: Apps Script push (`clasp`), local scripts, anything not repo-hosted.
 
 ```bash
-ssh shawn-laptop 'cd ~/projects/<dir> && claude -p "<self-contained brief>" \
-  --output-format json'
+cd ~/projects/<dir> && claude -p "<self-contained brief>" --output-format json
 ```
+
+(If the gateway ever moves off the laptop, this lane becomes the same
+command over SSH/Tailscale with a dedicated restricted key.)
 
 - Keep briefs bounded: one task per invocation, state what "done" means.
 - Capture the JSON result; summarize outcome + any failures to Shawn.

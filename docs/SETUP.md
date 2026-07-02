@@ -1,8 +1,9 @@
 # Hermes Setup Runbook
 
 Step-by-step to a working assistant: Telegram first (day one), Google
-Workspace second, iMessage via Photon third. Run on the target host — a small
-VPS, or a Mac/Linux box that stays on.
+Workspace second, iMessage via Photon third. **Decided: runs locally on
+Shawn's Mac laptop** (§1.1 covers keeping it alive; revisit a Mac mini/VPS
+only if laptop sleep becomes a real problem).
 
 > Commands below were cross-checked against the Hermes docs in July 2026 but
 > the project moves fast — if a command errors, check
@@ -33,6 +34,31 @@ Configure the model provider when prompted (onboarding), or later:
 ```bash
 hermes model              # pick provider + model, e.g. Anthropic Claude Sonnet
 ```
+
+### 1.1 Keeping it alive on a laptop (macOS)
+
+```bash
+hermes gateway install    # launchd LaunchAgent: starts at login, restarts on crash
+hermes gateway status     # verify it's actually running under launchd
+```
+
+Caveats worth knowing:
+- On recent macOS versions `launchctl` sometimes fails (exit 5 /
+  "domain does not support specified action") and Hermes silently falls
+  back to a plain background process — which will NOT auto-start at login.
+  Always confirm with `hermes gateway status` after a reboot.
+- The in-chat `/restart` command has a known launchd race that can leave
+  the gateway down; if the bot goes quiet, `hermes gateway start` from a
+  terminal.
+- **Sleep is the real enemy.** Cron jobs don't run while the lid is closed:
+  - System Settings → Battery → Options → "Prevent automatic sleeping on
+    power adapter when the display is off" — and keep the laptop plugged in
+    overnight, or
+  - `caffeinate -s` in a background terminal / the Amphetamine app.
+  - Missed-while-asleep jobs: expect the 7am briefing to fire at wake if
+    the Mac slept through it — treat a "stale" briefing time as the tell.
+- If the laptop is regularly asleep or away, that's the trigger to move the
+  gateway to a Mac mini or VPS — the `~/.hermes/` directory moves with it.
 
 ## 2. Telegram channel (~5 minutes)
 
